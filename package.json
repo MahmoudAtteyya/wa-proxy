@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node proxy_server.js",
     "dev": "nodemon proxy_server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test_new_api.js"
   },
   "keywords": [
     "proxy",

@@ -3,17 +3,14 @@ const cors = require('cors');
 const axios = require('axios');
 const https = require('https');
 const fs = require('fs');
+const config = require('./config');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const HTTPS_PORT = process.env.HTTPS_PORT || 443;
+const PORT = config.proxy.port;
+const HTTPS_PORT = config.proxy.httpsPort;
 
 // تفعيل CORS للسماح بالاتصال من أي دومين
-app.use(cors({
-  origin: '*', // يمكنك تحديد النطاقات المسموحة بدلاً من * للأمان
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(cors(config.proxy.cors));
 
 // تفعيل استقبال JSON
 app.use(express.json({ limit: '10mb' }));
@@ -24,13 +21,25 @@ app.use((req, res, next) => {
   next();
 });
 
-// الراوت الرئيسي للبروكسي
+// الراوت الرئيسي للبروكسي - محدث لاستخدام API الجديد
 app.post('/send-message', async (req, res) => {
   try {
     console.log('Received request:', req.body);
     
-    // إعادة توجيه الطلب إلى API الداخلي
-    const response = await axios.post('http://wa.elliaa.com/send-message', req.body, {
+    // تحويل المعاملات من API القديم إلى الجديد
+    const { number, message, ...otherParams } = req.body;
+    
+    // إنشاء body جديد مع المعاملات المحدثة
+    const newRequestBody = {
+      phone: number, // تغيير من 'number' إلى 'phone'
+      message: message,
+      ...otherParams // الاحتفاظ بأي معاملات إضافية
+    };
+    
+    console.log('Transformed request body:', newRequestBody);
+    
+    // إعادة توجيه الطلب إلى API الجديد
+    const response = await axios.post(`${config.newApi.baseUrl}${config.newApi.endpoints.sendMessage}`, newRequestBody, {
       headers: {
         'Content-Type': 'application/json',
         // نقل أي headers إضافية من الطلب الأصلي
@@ -39,13 +48,30 @@ app.post('/send-message', async (req, res) => {
         host: undefined,
         'content-length': undefined
       },
-      timeout: 30000 // 30 ثانية timeout
+      timeout: config.newApi.timeout
     });
 
-    console.log('API Response Status:', response.status);
+    console.log('New API Response Status:', response.status);
+    console.log('New API Response Data:', response.data);
     
-    // إرسال الرد الأصلي من API إلى الواجهة
-    res.status(response.status).json(response.data);
+    // معالجة الاستجابة الجديدة من API
+    if (response.data.success) {
+      // نجح إرسال الرسالة
+      res.status(200).json({
+        success: true,
+        messageId: response.data.messageId,
+        timestamp: response.data.timestamp,
+        phone: response.data.phone,
+        message: 'Message sent successfully'
+      });
+    } else {
+      // فشل إرسال الرسالة
+      res.status(400).json({
+        success: false,
+        error: response.data.error || 'Failed to send message',
+        message: response.data.message || 'Unknown error occurred'
+      });
+    }
     
   } catch (error) {
     console.error('Proxy Error:', error.message);
@@ -53,32 +79,37 @@ app.post('/send-message', async (req, res) => {
     // معالجة أخطاء الشبكة والاتصال
     if (error.code === 'ECONNREFUSED') {
       return res.status(503).json({
+        success: false,
         error: 'Service Unavailable',
-        message: 'Unable to connect to the WhatsApp API service',
+        message: 'Unable to connect to the new WhatsApp API service',
         code: 'CONNECTION_REFUSED'
       });
     }
     
     if (error.code === 'ETIMEDOUT') {
       return res.status(504).json({
+        success: false,
         error: 'Gateway Timeout',
-        message: 'Request timeout while connecting to WhatsApp API',
+        message: 'Request timeout while connecting to new WhatsApp API',
         code: 'TIMEOUT'
       });
     }
     
-    // معالجة أخطاء HTTP من API
+    // معالجة أخطاء HTTP من API الجديد
     if (error.response) {
+      const errorData = error.response.data;
       return res.status(error.response.status).json({
-        error: 'API Error',
-        message: error.response.data?.message || 'Error from WhatsApp API',
-        data: error.response.data,
+        success: false,
+        error: errorData?.error || 'API Error',
+        message: errorData?.message || 'Error from new WhatsApp API',
+        data: errorData,
         status: error.response.status
       });
     }
     
     // خطأ عام
     res.status(500).json({
+      success: false,
       error: 'Internal Server Error',
       message: 'An unexpected error occurred while processing your request',
       code: 'INTERNAL_ERROR'
@@ -92,17 +123,48 @@ app.get('/health', (req, res) => {
     status: 'OK',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    service: 'WhatsApp Proxy Server'
+    service: 'WhatsApp Proxy Server (Updated)',
+    newApiEndpoint: `${config.newApi.baseUrl}${config.newApi.endpoints.sendMessage}`
   });
+});
+
+// راوت للتحقق من حالة API الجديد
+app.get('/api-status', async (req, res) => {
+  try {
+    const response = await axios.get(`${config.newApi.baseUrl}${config.newApi.endpoints.status}`, {
+      timeout: 10000
+    });
+    
+    res.json({
+      success: true,
+      newApiStatus: response.data,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    res.status(503).json({
+      success: false,
+      error: 'New API Status Check Failed',
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 // راوت افتراضي
 app.get('/', (req, res) => {
   res.json({
-    message: 'WhatsApp Proxy Server is running',
+    message: 'WhatsApp Proxy Server is running (Updated to New API)',
     endpoints: {
       proxy: 'POST /send-message',
-      health: 'GET /health'
+      health: 'GET /health',
+      apiStatus: 'GET /api-status'
+    },
+    newApiEndpoint: `${config.newApi.baseUrl}${config.newApi.endpoints.sendMessage}`,
+    changes: {
+      parameterMapping: 'number -> phone',
+      responseFormat: 'Updated to new API format',
+      errorHandling: 'Enhanced for new API'
     }
   });
 });
@@ -110,6 +172,7 @@ app.get('/', (req, res) => {
 // معالجة الراوتات غير الموجودة
 app.use('*', (req, res) => {
   res.status(404).json({
+    success: false,
     error: 'Not Found',
     message: 'The requested endpoint does not exist'
   });
@@ -119,6 +182,7 @@ app.use('*', (req, res) => {
 app.use((err, req, res, next) => {
   console.error('Unhandled Error:', err);
   res.status(500).json({
+    success: false,
     error: 'Internal Server Error',
     message: 'An unexpected error occurred'
   });
@@ -135,7 +199,8 @@ function startServer() {
     
     https.createServer(sslOptions, app).listen(HTTPS_PORT, () => {
       console.log(`🚀 HTTPS Proxy Server running on https://proxy.elliaa.com:${HTTPS_PORT}`);
-      console.log(`🔗 Proxying to: http://wa.elliaa.com/send-message`);
+      console.log(`🔗 Proxying to: ${config.newApi.baseUrl}${config.newApi.endpoints.sendMessage} (NEW API)`);
+      console.log(`📱 Parameter mapping: number -> phone`);
     });
     
   } catch (sslError) {
@@ -144,7 +209,8 @@ function startServer() {
     // تشغيل HTTP إذا لم تكن شهادات SSL متوفرة
     app.listen(PORT, () => {
       console.log(`🚀 HTTP Proxy Server running on http://localhost:${PORT}`);
-      console.log(`🔗 Proxying to: http://wa.elliaa.com/send-message`);
+      console.log(`🔗 Proxying to: ${config.newApi.baseUrl}${config.newApi.endpoints.sendMessage} (NEW API)`);
+      console.log(`📱 Parameter mapping: number -> phone`);
       console.log('⚠️  Note: For production, configure SSL certificates for HTTPS');
     });
   }
